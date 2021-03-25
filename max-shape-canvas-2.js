@@ -14,16 +14,23 @@ setoutletassist(0, "Edge Durations");
 setoutletassist(1, "Note Values");
 setoutletassist(2, "Note Velocities");
 setoutletassist(3, "Perimeter Length");
+setoutletassist(4, "Note indexes");
 
 var hoveredVertex = -1;
 var hoveredMidpoint = -1;
 var draggingVertex = -1;
 var currentNoteIndex = 0;
 var currentEdgeProgress = 0;
-var initialNote = 36;
 var mousePos = [-2, -2];
 var fixedPerimeterLength = 350;
 var frameCount = 0;
+
+var isGridEnabled = false;
+var gridSize;
+var isPlaying = false;
+
+var NOTE_MODES = { SINGLE: "SINGLE", MULTI: "MULTI" };
+var activeMode = NOTE_MODES.SINGLE;
 
 var lastX = 0;
 var lastY = 0;
@@ -53,20 +60,9 @@ var progressColor = [0.9, 0.8, 0.8];
 setup();
 mgraphics.redraw();
 
-function randomize() {
-  var len = Math.floor(Math.random() * 7) + 3;
-  var newPoints = [];
-  for (var i = 0; i < len; i++) {
-    newPoints.push({
-      pos: [Math.random() * width, Math.random() * height],
-      velocity: Math.random() * 127,
-    });
-  }
-  updatePoints(newPoints);
-  edges = getEdges();
-  mgraphics.redraw();
-  outputNoteInfo();
-}
+// -----------------------------------------------
+// -------------------- UTILS --------------------
+// -----------------------------------------------
 
 function map(n, start1, stop1, start2, stop2, withinBounds) {
   return ((n - start1) / (stop1 - start1)) * (stop2 - start2) + start2;
@@ -86,7 +82,7 @@ function getEdges() {
 }
 
 function clampToScreen(val) {
-  return Math.min(Math.max(val, 0), width);
+  return Math.min(Math.max(val, 10), width - 10);
 }
 
 function dist(p1, p2) {
@@ -110,6 +106,10 @@ function getPerimeterLength(points) {
 }
 
 function pointAlongEdge(edge, percent) {
+  if (!edge) {
+    post("pointAlongEdge called for empty edge");
+    return;
+  }
   var p1 = edge[0];
   var p2 = edge[1];
   return [p1[0] + (p2[0] - p1[0]) * percent, p1[1] + (p2[1] - p1[1]) * percent];
@@ -153,23 +153,78 @@ function getMidPoint(p1, p2) {
   return [(p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2];
 }
 
-// ----------------------------------------------------------------
+function isBetween(val, a, b) {
+  return val >= a && val <= b;
+}
 
-function updatePoints(pts) {
-  // points = getPointsForFixedPerimeterLength(pts, fixedPerimeterLength);
-  points = pts;
-  outputNoteInfo();
+// TODO rewrite this?
+function angleBetween(p1, p2, p3) {
+  var atanA = Math.atan2(p1[0] - p2[0], p1[1] - p2[1]);
+  var atanC = Math.atan2(p3[0] - p2[0], p3[1] - p2[1]);
+  var diff = atanA - atanC;
+  diff = (diff * 180) / Math.PI;
+  return diff;
+}
+
+// TODO rewrite this?
+function thetaToScaleDegree(theta, nNotesInScale) {
+  if (theta < 0) {
+    theta = theta + 360;
+  }
+
+  if (theta > 180) {
+    theta = theta - 360;
+  }
+
+  // right turn or left turn
+  var negMult = theta < 0 ? 1 : -1;
+  var absTheta = Math.abs(theta);
+
+  // find sector
+  var notesInScale = nNotesInScale;
+  var dTheta = 180 / notesInScale;
+  var lowerBound = 0;
+  var upperBound = dTheta;
+
+  var degreeDiff = 0;
+  for (var i = notesInScale; i > 0; i--) {
+    if (isBetween(absTheta, lowerBound, upperBound)) {
+      degreeDiff = i * negMult;
+      break;
+    }
+    lowerBound = upperBound;
+    upperBound += dTheta;
+  }
+  return degreeDiff;
 }
 
 // ----------------------------------------------------------------
+// ----------------------- DRAWING UTILS --------------------------
+// ----------------------------------------------------------------
 
-function bang() {
-  mgraphics.redraw();
+function circle(p, r) {
+  mgraphics.ellipse(p[0] - r, p[1] - r, r * 2, r * 2);
 }
 
+function drawMidpoint(p, r, shouldFill) {
+  mgraphics.set_line_width(2);
+  mgraphics.set_source_rgba(strokeColor, 0.5);
+  circle(p, r);
+  mgraphics.stroke();
+  if (shouldFill) {
+    mgraphics.set_source_rgba(strokeColor, 0.5);
+    circle(p, r);
+    mgraphics.fill();
+  }
+}
+
+// ----------------------------------------------------------------
+// ----------------------------------------------------------------
 // ----------------------------------------------------------------
 
 function outputNoteInfo() {
+  edges = getEdges();
+
   var startTimes = [];
   var dur = 0;
   var perimLength = points.length > 1 ? getPerimeterLength(points) : 0;
@@ -195,20 +250,50 @@ function outputNoteInfo() {
       accumulatedDuration += dur;
     }
   }
+
+  var thetas = [];
+
+  var pts = points.map(function (p) {
+    return p.pos;
+  });
+
+  pts.push(points[0].pos);
+
+  if (activeMode === NOTE_MODES.MULTI) {
+    var scaleDegrees = [0];
+    for (var i = 1; i < pts.length - 1; i++) {
+      var p = pts[i];
+      var pPrev = pts[i - 1];
+      var pNext = pts[i + 1];
+      var theta = angleBetween(pPrev, p, pNext);
+      var scaleDegree = thetaToScaleDegree(theta, 7);
+      var prevDegree = scaleDegrees[i - 1];
+      scaleDegrees.push(scaleDegree + prevDegree);
+      thetas.push(theta);
+    }
+
+    outlet(4, scaleDegrees);
+  } else {
+    outlet(
+      4,
+      points.map(function () {
+        return 0;
+      })
+    );
+  }
+
   outlet(
     0,
     noteStartTimesAsPercentOfTotalLength.length > 0
       ? noteStartTimesAsPercentOfTotalLength
       : "EMPTY"
   );
-  outlet(
-    1,
-    edges.length > 0
-      ? edges.map(function (e) {
-          return initialNote;
-        })
-      : "EMPTY"
-  );
+
+  var flattenedPoints = [];
+  points.forEach(function (p) {
+    flattenedPoints.push(p.pos[0], p.pos[1], p.velocity);
+  });
+  outlet(1, flattenedPoints.length > 0 ? flattenedPoints : "EMPTY");
   outlet(
     2,
     points.length > 0
@@ -221,50 +306,73 @@ function outputNoteInfo() {
   outlet(3, perimLength);
 }
 
+function reset(v) {
+  post("reset");
+  hoveredVertex = -1;
+  hoveredMidpoint = -1;
+  updatePoints(DEFAULT_POINTS.slice());
+  edges = getEdges();
+  mgraphics.redraw();
+  bang();
+  outputNoteInfo();
+}
+
+function randomize() {
+  var len = Math.floor(Math.random() * 7) + 3;
+  var newPoints = [];
+  for (var i = 0; i < len; i++) {
+    newPoints.push({
+      pos: [
+        clampToScreen(Math.random() * width),
+        clampToScreen(Math.random() * height),
+      ],
+      velocity: Math.random() * 127,
+    });
+  }
+  updatePoints(newPoints);
+  edges = getEdges();
+  mgraphics.redraw();
+  outputNoteInfo();
+}
+
+function updatePoints(pts) {
+  // points = getPointsForFixedPerimeterLength(pts, fixedPerimeterLength);
+  points = pts;
+  outputNoteInfo();
+}
+
+function bang() {
+  mgraphics.redraw();
+}
+
 function setup() {
   // calculate the current width and height
   width = box.rect[2] - box.rect[0];
   height = box.rect[3] - box.rect[1];
-
+  gridSize = width / 7;
   updatePoints(DEFAULT_POINTS.slice());
   edges = getEdges();
   // force a redraw
   mgraphics.redraw();
-}
-
-function circle(p, r) {
-  mgraphics.ellipse(p[0] - r, p[1] - r, r * 2, r * 2);
-}
-
-function drawVertex(p, r, withOutline, a, color) {
-  mgraphics.set_source_rgba(color, a);
-  circle(p.pos, r);
-  mgraphics.fill();
-
-  if (withOutline) {
-    mgraphics.set_line_width(1);
-    circle(p.pos, r * 1.2);
-    mgraphics.stroke();
-  }
-}
-
-function drawMidpoint(p, r, shouldFill) {
-  mgraphics.set_line_width(2);
-  mgraphics.set_source_rgba(strokeColor, 0.5);
-  circle(p, r);
-  mgraphics.stroke();
-  if (shouldFill) {
-    mgraphics.set_source_rgba(strokeColor, 0.5);
-    circle(p, r);
-    mgraphics.fill();
-  }
+  outlet(0, "bang");
 }
 
 function paint() {
   with (mgraphics) {
-    set_source_rgba(BG_COLOR, 0.8);
+    set_source_rgba(BG_COLOR, 1);
     rectangle(0, 0, width, height);
     fill();
+
+    // grid
+    if (isGridEnabled) {
+      for (var i = gridSize / 2; i < width; i += gridSize) {
+        for (var j = gridSize / 2; j < height; j += gridSize) {
+          set_source_rgba(strokeColor, 0.5);
+          circle([i, j], 1);
+          fill();
+        }
+      }
+    }
 
     // draw edges
     edges.forEach(function (edge, i) {
@@ -276,19 +384,21 @@ function paint() {
       line_to(p2[0], p2[1]);
       stroke();
 
-      if (currentNoteIndex > i) {
-        set_source_rgba(progressColor, 1);
-        set_line_width(DEFAULT_EDGE_WIDTH * 2);
-        move_to(p1[0], p1[1]);
-        line_to(p2[0], p2[1]);
-        stroke();
-      } else if (currentNoteIndex === i) {
-        set_source_rgba(progressColor, 1);
-        set_line_width(DEFAULT_EDGE_WIDTH * 2);
-        var progressP = pointAlongEdge(edge, currentEdgeProgress);
-        move_to(p1[0], p1[1]);
-        line_to(progressP[0], progressP[1]);
-        stroke();
+      if (isPlaying) {
+        if (currentNoteIndex > i) {
+          set_source_rgba(progressColor, 1);
+          set_line_width(DEFAULT_EDGE_WIDTH * 2);
+          move_to(p1[0], p1[1]);
+          line_to(p2[0], p2[1]);
+          stroke();
+        } else if (currentNoteIndex === i) {
+          set_source_rgba(progressColor, 1);
+          set_line_width(DEFAULT_EDGE_WIDTH * 2);
+          var progressP = pointAlongEdge(edge, currentEdgeProgress);
+          move_to(p1[0], p1[1]);
+          line_to(progressP[0], progressP[1]);
+          stroke();
+        }
       }
 
       var r = DEFAULT_VERTEX_RADIUS * 0.8;
@@ -328,7 +438,7 @@ function paint() {
       // circle(p.pos, r * 1.2);
       // stroke();
 
-      var vertexColor = strokeColor;
+      var vertexColor = progressColor;
 
       if (isHovering) {
         a = 1;
@@ -359,7 +469,7 @@ function paint() {
       fill();
     });
 
-    if (currentNoteIndex > -1 && edges.length > 0) {
+    if (isPlaying && currentNoteIndex > -1 && edges.length > 0) {
       var progressP = pointAlongEdge(
         edges[currentNoteIndex],
         currentEdgeProgress
@@ -387,7 +497,21 @@ function paint() {
   }
 }
 
-// -----------------------------------------------
+// --------------------------------------------------
+// ----------------- HANDLERS -----------------------
+// --------------------------------------------------
+
+function snapToGrid(p) {
+  if (!isGridEnabled) {
+    return p;
+  }
+
+  var offset = gridSize / 2;
+  return [
+    Math.round((p[0] - offset) / gridSize) * gridSize + offset,
+    Math.round((p[1] - offset) / gridSize) * gridSize + offset,
+  ];
+}
 
 function ondrag(x, y, but, cmd, shift, capslock, option, ctrl) {
   var currP = [x, y];
@@ -413,9 +537,8 @@ function ondrag(x, y, but, cmd, shift, capslock, option, ctrl) {
       }
       points[draggingVertex].velocity = newVelocity;
       lastY = y;
-      // TODO: set velocity
     } else {
-      points[draggingVertex].pos = currP.map(clampToScreen);
+      points[draggingVertex].pos = snapToGrid(currP.map(clampToScreen));
     }
   }
   updatePoints(points);
@@ -487,7 +610,38 @@ function onclick(x, y, but, cmd, shift, capslock, option, ctrl) {
   mgraphics.redraw();
 }
 
-// ---------------------------------
+// ----------- public functions ----------------
+
+function reverse() {
+  var newPoints = points.slice();
+  var first = newPoints.shift();
+  newPoints = newPoints.reverse();
+  newPoints.unshift(first);
+  updatePoints(newPoints);
+}
+
+function setGrid(v) {
+  isGridEnabled = !!v;
+}
+
+function setIsPlaying(v) {
+  isPlaying = !!v;
+}
+
+function setPoints(v) {
+  // post(typeof v);
+  var storedPoints = v.toString().split(" ");
+  post(storedPoints.length);
+  var newPoints = [];
+  for (var i = 0; i < storedPoints.length; i += 3) {
+    var pos = [parseFloat(storedPoints[i]), parseFloat(storedPoints[i + 1])];
+    var velocity = parseInt(storedPoints[i + 2]);
+    newPoints.push({ pos: pos, velocity: velocity });
+  }
+  post(newPoints.length);
+  updatePoints(newPoints);
+  outputNoteInfo();
+}
 
 function setCurrentNote(v) {
   currentNoteIndex = v - 1;
@@ -497,42 +651,22 @@ function setCurrentEdgeProgress(v) {
   currentEdgeProgress = v;
 }
 
-function setInitialNote(v) {
-  initialNote = v;
+function setColor(c) {
+  var cArray = c.toString().split(" ");
+  cArray.length = 3;
+  BG_COLOR = cArray.map(function (c) {
+    return c * 0.8;
+  });
+  strokeColor = cArray.map(function (c) {
+    return c * 2.8;
+  });
+  progressColor = cArray.map(function (c) {
+    return c * 4.3;
+  });
+}
+
+function setMode(val) {
+  post(val);
+  activeMode = val;
   outputNoteInfo();
-}
-
-function setColorIndex(i, c) {
-  BG_COLOR[i] = c * 0.8;
-  strokeColor[i] = c * 2.5;
-  progressColor[i] = c * 4;
-}
-
-// ---------------------------------
-
-function setColorR(c) {
-  setColorIndex(0, c);
-}
-
-function setColorG(c) {
-  setColorIndex(1, c);
-}
-
-function setColorB(c) {
-  setColorIndex(2, c);
-}
-
-// ---------------------------------
-
-function reset(v) {
-  post("reset");
-  hoveredVertex = -1;
-  hoveredMidpoint = -1;
-  // points.length = 0;
-  updatePoints(DEFAULT_POINTS.slice());
-  edges = getEdges();
-  mgraphics.redraw();
-  bang();
-  outputNoteInfo();
-  outlet(4, "bang");
 }
