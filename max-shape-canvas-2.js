@@ -1,3 +1,5 @@
+var currentStateDict = new Dict("---CurrentState");
+
 var mouseX = 0;
 var mouseY = 0;
 
@@ -29,7 +31,7 @@ var isGridEnabled = false;
 var gridSize;
 var isPlaying = false;
 
-var NOTE_MODES = { SINGLE: "SINGLE", MULTI: "MULTI" };
+var NOTE_MODES = { SINGLE: "RHYTHM", MULTI: "MELODY" };
 var activeMode = NOTE_MODES.SINGLE;
 
 var lastX = 0;
@@ -37,13 +39,11 @@ var lastY = 0;
 var isShiftPressed = false;
 var isCmdPressed = false;
 var isDragging = false;
+var isMouseHovering = false;
 
 var DEFAULT_VELOCITY = 127;
 
-var DEFAULT_POINTS = [
-  { pos: [20, 20], velocity: DEFAULT_VELOCITY },
-  { pos: [150, 150], velocity: DEFAULT_VELOCITY },
-];
+var DEFAULT_POINTS;
 var points = [];
 var velocities = [];
 var edges = [];
@@ -148,6 +148,20 @@ function getPointsForFixedPerimeterLength(points, length) {
 
   return newPoints;
 }
+
+// function centerShape(points) {
+//   var avgPoint = getAveragePoint(points);
+//   var centerPoint = [width / 2, height / 2];
+//   const offX = centerPoint[0] - avgPoint[0];
+//   const offY = centerPoint[1] - avgPoint[1];
+//   var newPoints = points.map(function (p, i) {
+//     var pos = p.pos;
+//     var x = pos[0] + offX;
+//     var y = pos[1] + offY;
+//     return { pos: [x, y], velocity: p.velocity };
+//   });
+//   updatePoints(newPoints);
+// }
 
 function getMidPoint(p1, p2) {
   return [(p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2];
@@ -322,11 +336,11 @@ function randomize() {
   var newPoints = [];
   for (var i = 0; i < len; i++) {
     newPoints.push({
-      pos: [
+      pos: snapToGrid([
         clampToScreen(Math.random() * width),
         clampToScreen(Math.random() * height),
-      ],
-      velocity: Math.random() * 127,
+      ]),
+      velocity: Math.floor(Math.random() * 128),
     });
   }
   updatePoints(newPoints);
@@ -346,12 +360,41 @@ function bang() {
 }
 
 function setup() {
+  max.showcursor();
+
   // calculate the current width and height
   width = box.rect[2] - box.rect[0];
   height = box.rect[3] - box.rect[1];
   gridSize = width / 7;
-  updatePoints(DEFAULT_POINTS.slice());
+  var offset = gridSize + gridSize / 2;
+  DEFAULT_POINTS = [
+    {
+      pos: [offset, offset],
+      velocity: DEFAULT_VELOCITY,
+    },
+    { pos: [width - offset, height - offset], velocity: DEFAULT_VELOCITY },
+  ];
+
+  var storedPoints = currentStateDict.get("shapePoints");
+  post("Loading Points");
+  post(storedPoints.slice());
+  post(typeof storedPoints);
+  post(typeof storedPoints[0]);
+
+  var pts = DEFAULT_POINTS.slice();
+  if (storedPoints) {
+    var newPoints = [];
+    for (var i = 0; i < storedPoints.length; i += 3) {
+      var pos = [parseFloat(storedPoints[i]), parseFloat(storedPoints[i + 1])];
+      var velocity = parseInt(storedPoints[i + 2]);
+      newPoints.push({ pos: pos, velocity: velocity });
+    }
+    pts = newPoints;
+  }
+
+  updatePoints(pts);
   edges = getEdges();
+  outputNoteInfo();
   // force a redraw
   mgraphics.redraw();
   outlet(0, "bang");
@@ -360,7 +403,7 @@ function setup() {
 function paint() {
   with (mgraphics) {
     set_source_rgba(BG_COLOR, 1);
-    rectangle(0, 0, width, height);
+    rectangle_rounded(0, 0, width, height, 16, 16);
     fill();
 
     // grid
@@ -385,14 +428,16 @@ function paint() {
       stroke();
 
       if (isPlaying) {
+        // var alpha = hoveredVertex > -1 ? 0.2 : 1;
+        var alpha = 1;
         if (currentNoteIndex > i) {
-          set_source_rgba(progressColor, 1);
+          set_source_rgba(progressColor, alpha);
           set_line_width(DEFAULT_EDGE_WIDTH * 2);
           move_to(p1[0], p1[1]);
           line_to(p2[0], p2[1]);
           stroke();
         } else if (currentNoteIndex === i) {
-          set_source_rgba(progressColor, 1);
+          set_source_rgba(progressColor, alpha);
           set_line_width(DEFAULT_EDGE_WIDTH * 2);
           var progressP = pointAlongEdge(edge, currentEdgeProgress);
           move_to(p1[0], p1[1]);
@@ -404,7 +449,7 @@ function paint() {
       var r = DEFAULT_VERTEX_RADIUS * 0.8;
       var a = 0;
 
-      if (!isShiftPressed && !isCmdPressed) {
+      if (isMouseHovering && !isCmdPressed) {
         var midpoint = getMidPoint(p1, p2);
         if (hoveredMidpoint > -1 && hoveredMidpoint === i) {
           r = r * 1.7;
@@ -427,7 +472,7 @@ function paint() {
       var centerRadius = map(p.velocity, 0, 127, 3, DEFAULT_VERTEX_RADIUS);
       var a = 1;
       var isFirst = i === 0;
-      var isHovering = hoveredVertex > -1 && hoveredVertex === i;
+      var isHovering = hoveredVertex === i;
 
       // Background vertex
       set_source_rgba(strokeColor, 0.4);
@@ -443,30 +488,38 @@ function paint() {
       if (isHovering) {
         a = 1;
 
-        // Line around
+        /* Encircling line */
         set_source_rgba(progressColor, 0.9);
         set_line_width(1);
         circle(p.pos, DEFAULT_VERTEX_RADIUS * 1.5);
         stroke();
 
-        if (isShiftPressed && points.length > 2) {
-          var rect = text_measure("-");
-          move_to(p.pos[0] - rect[0] / 2 + 12, p.pos[1] - rect[1] / 2);
-          set_source_rgba(progressColor, 1);
-          set_font_size(15);
-          text_path("-");
-          fill();
-        }
-        if (isCmdPressed && !isDragging) {
-          centerRadius = centerRadius + 1 * Math.sin(frameCount / 3);
+        /* Animation */
+        if (isCmdPressed) {
+          if (!isDragging) {
+            centerRadius = centerRadius + 1 * Math.sin(frameCount / 3);
+          }
         }
       }
-      // set_source_rgba(vertexColor, a);
-      // circle(p.pos, DEFAULT_VERTEX_RADIUS);
-      // fill();
+
+      /* Dim if NOT hovered */
+      if (hoveredVertex > -1 && hoveredVertex != i && isCmdPressed) {
+        a = 0.4;
+      }
       set_source_rgba(vertexColor, a);
+
       circle(p.pos, centerRadius);
       fill();
+
+      /* Velocity Label */
+      if (isHovering && isCmdPressed) {
+        var hoveredVelocity = points[hoveredVertex].velocity;
+        set_font_size(9.5);
+        move_to([4, height - 6]);
+        set_source_rgba(progressColor, 1);
+        text_path("VEL: " + hoveredVelocity);
+        fill();
+      }
     });
 
     if (isPlaying && currentNoteIndex > -1 && edges.length > 0) {
@@ -474,6 +527,11 @@ function paint() {
         edges[currentNoteIndex],
         currentEdgeProgress
       );
+      // if (hoveredVertex > -1) {
+      //   set_source_rgba(progressColor, 0.3);
+      // } else {
+      //   set_source_rgba(progressColor, 1);
+      // }
       set_source_rgba(progressColor, 1);
       circle(
         [progressP[0], progressP[1]],
@@ -513,12 +571,22 @@ function snapToGrid(p) {
   ];
 }
 
+// var dragStartX = -1;
+// var dragStartY = -1;
+
 function ondrag(x, y, but, cmd, shift, capslock, option, ctrl) {
   var currP = [x, y];
-
+  // post(but);
+  // post(dragStartX);
+  // if (but == 0 && dragStartX > -1) {
+  //   max.pupdate(dragStartX, dragStartY);
+  //   max.showcursor();
+  //   dragStartX = -1;
+  // }
   if (draggingVertex > -1) {
     var draggingPoint = points[draggingVertex];
     if (cmd) {
+      // max.hidecursor();
       isDragging = true;
       var deltaY = lastY - y;
       if (deltaY > 20) {
@@ -545,7 +613,13 @@ function ondrag(x, y, but, cmd, shift, capslock, option, ctrl) {
   edges = getEdges();
 }
 
+function onidleout() {
+  isMouseHovering = false;
+}
+
 function onidle(x, y, but, cmd, shift) {
+  isMouseHovering = true;
+
   isDragging = false;
   mouseX = x;
   mouseY = y;
@@ -573,10 +647,21 @@ function onidle(x, y, but, cmd, shift) {
   mgraphics.redraw();
 }
 
+function ondblclick() {
+  if (hoveredVertex > -1 && points.length > 2) {
+    points.splice(hoveredVertex, 1);
+    updatePoints(points);
+  }
+}
+
 function onclick(x, y, but, cmd, shift, capslock, option, ctrl) {
+  post("click");
   lastX = x;
   lastY = y;
-
+  // if (cmd) {
+  //   dragStartX = parseInt(x);
+  //   dragStartY = parseInt(y);
+  // }
   var newP = { pos: [x, y], velocity: DEFAULT_VELOCITY };
 
   draggingVertex = -1;
@@ -588,12 +673,13 @@ function onclick(x, y, but, cmd, shift, capslock, option, ctrl) {
     hoveredMidpoint = -1;
   } else if (hoveredVertex > -1) {
     // hold shift to delete
-    if (shift && points.length > 2) {
-      points.splice(hoveredVertex, 1);
-      updatePoints(points);
-    } else {
-      draggingVertex = hoveredVertex;
-    }
+    draggingVertex = hoveredVertex;
+    // if (shift && points.length > 2) {
+    //   points.splice(hoveredVertex, 1);
+    //   updatePoints(points);
+    // } else {
+    //   draggingVertex = hoveredVertex;
+    // }
   } else {
     // points.push(newP);
     // if (points.length > 1) {
@@ -655,7 +741,7 @@ function setColor(c) {
   var cArray = c.toString().split(" ");
   cArray.length = 3;
   BG_COLOR = cArray.map(function (c) {
-    return c * 0.8;
+    return c * 0.6;
   });
   strokeColor = cArray.map(function (c) {
     return c * 2.8;
